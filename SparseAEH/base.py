@@ -9,6 +9,8 @@ import warnings
 from sklearn.cluster import KMeans
 from scipy.spatial import distance_matrix
 import random
+from scipy.stats import chi2
+from .utils import update_cond_mean, update_cond_cov, GaussianNLL, LikRatio_Test
 
 def _pinv_1d(v, eps=1e-5):
     return np.array([0 if abs(x) <= eps else 1/x for x in v], dtype=float)
@@ -30,7 +32,7 @@ class Kernel:
         """
         super().__init__()
         self.N = len(spatial)
-        #self.all_cov = [[0 for _ in range(self.M)] for _ in range(self.M)]
+        #self.full_cov = [[0 for _ in range(self.M)] for _ in range(self.M)]
         #self.ss_loc = ss_loc
         self.spatial = spatial
         self.cond_mean = None
@@ -47,9 +49,9 @@ class Kernel:
             col = []
             for c in cols:
                 if r >= c:
-                    col.append(self.all_cov[r][c])
+                    col.append(self.full_cov[r][c])
                 else:
-                    col.append(self.all_cov[c][r].T)
+                    col.append(self.full_cov[c][r].T)
             row.append(np.hstack(col))
         return np.vstack(row)
 
@@ -57,7 +59,7 @@ class Kernel:
     def _initialize(self,cov,ss_loc,dependency,group_size):
         self._init_ss(ss_loc,dependency,group_size)
         self._init_ds_loc()
-        self._init_all_cov(cov)
+        self._init_full_cov(cov)
         self._init_ds_eig()
         self._init_base_cond_cov()        
         #self._init_cond_cov()
@@ -106,40 +108,39 @@ class Kernel:
                ind += np.array(self.ss_loc[ss]).tolist()
            self.ds_loc.append(ind)
     
-    def _init_all_cov(self,cov):
-        self.all_cov = [[0 for _ in range(self.M)] for _ in range(self.M)]
+    def _init_full_cov(self,cov):
+        self.full_cov = [[0 for _ in range(self.M)] for _ in range(self.M)]
         for i in range(self.M):
             if cov is not None:
-                self.all_cov[i][i] = cov[np.ix_(self.ss_loc[i],self.ss_loc[i])]
+                self.full_cov[i][i] = cov[np.ix_(self.ss_loc[i],self.ss_loc[i])]
             else:
                 if self.kernel == 'rbf':
-                    self.all_cov[i][i] = rbf_kernel(self.spatial[self.ss_loc[i]],gamma=self.l)
+                    self.full_cov[i][i] = rbf_kernel(self.spatial[self.ss_loc[i]],gamma=self.l)
                 else:
-                    self.all_cov[i][i] = laplacian_kernel(self.spatial[self.ss_loc[i]],gamma=self.l)
+                    self.full_cov[i][i] = laplacian_kernel(self.spatial[self.ss_loc[i]],gamma=self.l)
             for j in self.dependency[i]:
                 if cov is not None:
-                    self.all_cov[i][j] = cov[np.ix_(self.ss_loc[i],self.ss_loc[j])]
+                    self.full_cov[i][j] = cov[np.ix_(self.ss_loc[i],self.ss_loc[j])]
                 else:
                     if self.kernel == 'rbf':
-                        self.all_cov[i][j] = rbf_kernel(self.spatial[self.ss_loc[i]],
+                        self.full_cov[i][j] = rbf_kernel(self.spatial[self.ss_loc[i]],
                                                         self.spatial[self.ss_loc[j]],gamma=self.l)
                     else:
-                        self.all_cov[i][j] = laplacian_kernel(self.spatial[self.ss_loc[i]],
+                        self.full_cov[i][j] = laplacian_kernel(self.spatial[self.ss_loc[i]],
                                                               self.spatial[self.ss_loc[j]],gamma=self.l)
         for k in range(self.M):
             for i in self.dependency[k]:
                 for j in self.dependency[k]:
-                    if j<i and isinstance(self.all_cov[i][j],int):
+                    if j<i and isinstance(self.full_cov[i][j],int):
                         if cov is not None:
-                            self.all_cov[i][j] = cov[np.ix_(self.ss_loc[i],self.ss_loc[j])]
+                            self.full_cov[i][j] = cov[np.ix_(self.ss_loc[i],self.ss_loc[j])]
                         else:
                             if self.kernel == 'rbf':
-                                self.all_cov[i][j] = rbf_kernel(self.spatial[self.ss_loc[i]],
+                                self.full_cov[i][j] = rbf_kernel(self.spatial[self.ss_loc[i]],
                                                                 self.spatial[self.ss_loc[j]],gamma=self.l)
                             else:
-                                self.all_cov[i][j] = laplacian_kernel(self.spatial[self.ss_loc[i]],
+                                self.full_cov[i][j] = laplacian_kernel(self.spatial[self.ss_loc[i]],
                                                                       self.spatial[self.ss_loc[j]],gamma=self.l)
-    
 
     def _init_ds_eig(self):
         #C_m,C_m
@@ -157,6 +158,7 @@ class Kernel:
     
 
     def _init_base_cond_cov(self):
+        # sigma when delta=0
         for i in range(self.M):
             if len(self.dependency[i]) == 0:
                 self.cond_cov.append(self.get_mat([i],[i]))
@@ -164,18 +166,62 @@ class Kernel:
                 self.cond_cov.append(self.get_mat([i],[i]) - np.multiply(1/self.ds_eig[i][0],self.A[i])@self.A[i].T)
     
 
-    def update_cond_cov(self,Delta):
-        cond_cov_eig = [[] for _ in range(len(Delta))]
-        for eig, delta in zip(cond_cov_eig,Delta):
-            for i in range(self.M):
-                if len(self.dependency[i]) == 0:
-                #self.cond_cov.append(self.kernel.base_cond_cov[i]+self.delta*np.eye(len(self.kernel.ss_loc[i])))
-                    s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i])))
-                else:
-                    s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i]))+
-                                         delta*np.multiply(1/((self.ds_eig[i][0]+delta)*self.ds_eig[i][0]),self.A[i])@self.A[i].T)
-                eig.append((s,u))
-        return cond_cov_eig
+    # def update_cond_cov(self,Delta):
+    #     if isinstance(Delta,int):
+    #         Delta = np.array([Delta])
+    #     cond_cov_eig = [[] for _ in range(len(Delta))] # k clusters
+    #     for eig, delta in zip(cond_cov_eig,Delta):
+    #         for i in range(self.M):
+    #             if len(self.dependency[i]) == 0:
+    #             #self.cond_cov.append(self.kernel.base_cond_cov[i]+self.delta*np.eye(len(self.kernel.ss_loc[i])))
+    #                 s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i])))
+    #             else:
+    #                 s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i]))+
+    #                                      delta*np.multiply(1/((self.ds_eig[i][0]+delta)*self.ds_eig[i][0]),self.A[i])@self.A[i].T)
+    #             eig.append((s,u))
+    #     return cond_cov_eig
+
+# def update_cond_mean(X,mean,kernel:Kernel):
+#     # for a given data sample, calculate the conditional deviance on dependent spot set
+#     cond_dev = X[np.newaxis,:] - mean.transpose()[:,:,np.newaxis]   #K,N,G
+#     dev = cond_dev.copy()
+#     for i in range(kernel.M):
+#         if len(kernel.dependency[i]) > 0:
+#             for k in range(K):
+#                 cond_dev[k,kernel.ss_loc[i],:] = cond_dev[k,kernel.ss_loc[i],:] - \
+#                 np.multiply(1/(kernel.ds_eig[i][0]+delta[k]),kernel.A[i]) @ kernel.ds_eig[i][1].T @ dev[k,kernel.ds_loc[i],:]
+#     return cond_dev
+
+# def GaussianNLL(X,kernel,mean,sigma_sq,delta):
+#     N,G = X.shape
+#     if isinstance(delta,int):
+#         delta = np.array([delta])
+#     if isinstance(sigma_sq,int):
+#         sigma_sq = np.array([sigma_sq])
+#     K = len(delta)
+#     ll = np.zeros((G,K))
+#     cond_dev = update_cond_mean(X,mean,kernel)
+#     for k in range(K):
+#         ll[:,k] = np.log(2 * np.pi)*N + 2*np.log(sigma_sq[k])*N
+#         for i in range(kernel.M):
+#             det = np.prod(cond_cov_eig[k][i][0])
+#             if det <= 0:
+#                 print(cond_cov_eig[k][i][0]) 
+#             ll[:,k] += np.log(det)
+#             temp = cond_dev[k][kernel.ss_loc[i],:].T @ cond_cov_eig[k][i][1]
+#             ll[:,k] += np.sum(np.multiply(1/cond_cov_eig[k][i][0],np.square(temp)),axis=1)/sigma_sq[k]
+#     ll = ll*-0.5
+#     return ll
+
+# def LikRatio_Test(X,kernel_1,kernel_2,mean_1,mean_2,sigma_sq_1,sigma_sq_2,delta_1,delta_2):
+#     ll_1 = GaussianNLL(kernel_1,mean_1,sigma_sq_1,delta_1)
+#     ll_2 = GaussianNLL(kernel_2,mean_2,sigma_sq_2,delta_2)
+#     lr_stat = 2 * (ll_2 - ll_1)
+#     if ll_1 > ll_2:
+#         print("Model 1 fits better.")
+#     elif ll_2 > ll_1:
+#         print("Model 2 fits better.")
+
 
 class MixedGaussian:
     def __init__(self,spatial,ss_loc=None,group_size=16,cov=None,dependency=None,d=5,kernel='rbf',l=0.01):
@@ -226,9 +272,9 @@ class MixedGaussian:
                 self.cov_new.append(cov_i)
             numer,t_2 = 0,0
             for i in range(self.kernel.M):
-                numer += np.sum(np.multiply(self.kernel.all_cov[i][i],self.cov_new[i]))
-                #denom += np.sum(np.multiply(self.kernel.all_cov[i][i],self.kernel.all_cov[i][i]))
-                #t_1 += np.trace(self.kernel.all_cov[i][i])
+                numer += np.sum(np.multiply(self.kernel.full_cov[i][i],self.cov_new[i]))
+                #denom += np.sum(np.multiply(self.kernel.full_cov[i][i],self.kernel.full_cov[i][i]))
+                #t_1 += np.trace(self.kernel.full_cov[i][i])
                 t_2 += np.trace(self.cov_new[i])
             #print(numer,denom,t_1,t_2)
             self.sigma_sq[k] = (numer - self.t_1*t_2/self.N)*0.5 / (self.denom - self.t_1**2/self.N) + self.sigma_sq[k]/2
@@ -260,6 +306,7 @@ class MixedGaussian:
         return kmeans.cluster_centers_.T
 
     def run_cluster(self,Y,K,pi=None,mean=None,sigma_sq=None,delta=None,iter=500,threshold=5e-2,init_mean='k_means',update_pi=True):
+        #initialization
         self.Y = Y
         self.K = K
         self.N,self.G = self.Y.shape
@@ -281,8 +328,6 @@ class MixedGaussian:
                 self.init_mean = self.Y[:,np.random.choice(self.G,self.K)]
             elif isinstance(init_mean,np.ndarray):
                 self.init_mean = init_mean
-            
-        #return self.mean
         if sigma_sq is not None:
             self.sigma_sq = np.array(sigma_sq,dtype=float)
         else:
@@ -292,6 +337,7 @@ class MixedGaussian:
         else:
             self.delta = np.ones(self.K,dtype=float)*1
         
+
         # power = np.zeros((G,self.K))
         self.omega = np.ones((self.G,self.K))/self.K
         converge = False
@@ -299,15 +345,15 @@ class MixedGaussian:
         #self.ll = np.zeros((self.G,self.K))
         self.denom,self.t_1 = 0,0
         for i in range(self.kernel.M):
-            self.denom += np.sum(np.multiply(self.kernel.all_cov[i][i],self.kernel.all_cov[i][i]))
-            self.t_1 += np.trace(self.kernel.all_cov[i][i])
+            self.denom += np.sum(np.multiply(self.kernel.full_cov[i][i],self.kernel.full_cov[i][i]))
+            self.t_1 += np.trace(self.kernel.full_cov[i][i])
         
         while not converge:
             print('Iteration {}'.format(count))
-            cond_cov_eig = self.kernel.update_cond_cov(self.delta)
-            self.update_cond_mean()
+            # cond_cov_eig = (self.kernel,self.delta)
+            # cond_dev = update_cond_mean(X,self.mean,self.kernel)
 
-            self.ll = self.compute_ll(cond_cov_eig)
+            ll = GaussianNLL(self.X,self.kernel,self.mean,self.sigma_sq,self.delta)
             #print(self.ll)
             #print(compute_likelihood(self.Y,self.kernel,self.cond_dev[0],self.sigma_sq[0],cond_cov_eig[0]))
             for k in range(self.K):
@@ -316,7 +362,7 @@ class MixedGaussian:
                 else:
                     for g in range(self.G):
                         #omega[g,k] = 3/4*self.pi[k]/np.sum(self.pi * _pexp((self.ll[g]-self.ll[g][k])/np.sqrt(self.N))) + omega[g,k]/4
-                        self.omega[g,k] = self.pi[k]/np.sum(self.pi * _pexp((self.ll[g]-self.ll[g][k])/np.sqrt(self.N))) + 1e-3/self.G
+                        self.omega[g,k] = self.pi[k]/np.sum(self.pi * _pexp((ll[g]-ll[g][k])/np.sqrt(self.N))) + 1e-3/self.G
                         # if np.sum(self.pi * _pexp((ll[g]-ll[g][k])/np.sqrt(self.N))) == 0:
                         #     print(ll[g],ll[g][k])
 
