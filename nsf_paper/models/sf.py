@@ -15,8 +15,8 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import LinearRegression
 from sklearn.neighbors import KNeighborsRegressor
 
-from models import likelihoods
-from utils import misc, nnfu
+from . import likelihoods
+from ..utils import misc, nnfu
 tfd = tfp.distributions
 tfb = tfp.bijectors
 tv = tfp.util.TransformedVariable

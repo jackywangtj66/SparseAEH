@@ -14,7 +14,7 @@ from time import time,process_time
 #from mofax import mofa_model
 from mofapy2.run.entry_point import entry_point
 
-from utils import misc
+from ..utils import misc
 # from models.likelihoods import InvalidLikelihoodError
 
 

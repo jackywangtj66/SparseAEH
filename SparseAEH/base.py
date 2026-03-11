@@ -73,8 +73,8 @@ class Kernel:
             centers = []
             self.ss_loc = []
             group = self.N / group_size
-            g_r = int(np.sqrt(group))
-            g_c = int(group/g_r)
+            g_r = max(1,int(np.sqrt(group)))
+            g_c = max(1,int(group/g_r))
             #self.M = g_c * g_r
             kmeans_r = KMeans(n_clusters=g_r, random_state=0, n_init=10)
             kmeans_c = KMeans(n_clusters=g_c, random_state=0, n_init=10)
@@ -165,62 +165,6 @@ class Kernel:
             else:
                 self.cond_cov.append(self.get_mat([i],[i]) - np.multiply(1/self.ds_eig[i][0],self.A[i])@self.A[i].T)
     
-
-    # def update_cond_cov(self,Delta):
-    #     if isinstance(Delta,int):
-    #         Delta = np.array([Delta])
-    #     cond_cov_eig = [[] for _ in range(len(Delta))] # k clusters
-    #     for eig, delta in zip(cond_cov_eig,Delta):
-    #         for i in range(self.M):
-    #             if len(self.dependency[i]) == 0:
-    #             #self.cond_cov.append(self.kernel.base_cond_cov[i]+self.delta*np.eye(len(self.kernel.ss_loc[i])))
-    #                 s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i])))
-    #             else:
-    #                 s,u = np.linalg.eigh(self.cond_cov[i]+delta*np.eye(len(self.ss_loc[i]))+
-    #                                      delta*np.multiply(1/((self.ds_eig[i][0]+delta)*self.ds_eig[i][0]),self.A[i])@self.A[i].T)
-    #             eig.append((s,u))
-    #     return cond_cov_eig
-
-# def update_cond_mean(X,mean,kernel:Kernel):
-#     # for a given data sample, calculate the conditional deviance on dependent spot set
-#     cond_dev = X[np.newaxis,:] - mean.transpose()[:,:,np.newaxis]   #K,N,G
-#     dev = cond_dev.copy()
-#     for i in range(kernel.M):
-#         if len(kernel.dependency[i]) > 0:
-#             for k in range(K):
-#                 cond_dev[k,kernel.ss_loc[i],:] = cond_dev[k,kernel.ss_loc[i],:] - \
-#                 np.multiply(1/(kernel.ds_eig[i][0]+delta[k]),kernel.A[i]) @ kernel.ds_eig[i][1].T @ dev[k,kernel.ds_loc[i],:]
-#     return cond_dev
-
-# def GaussianNLL(X,kernel,mean,sigma_sq,delta):
-#     N,G = X.shape
-#     if isinstance(delta,int):
-#         delta = np.array([delta])
-#     if isinstance(sigma_sq,int):
-#         sigma_sq = np.array([sigma_sq])
-#     K = len(delta)
-#     ll = np.zeros((G,K))
-#     cond_dev = update_cond_mean(X,mean,kernel)
-#     for k in range(K):
-#         ll[:,k] = np.log(2 * np.pi)*N + 2*np.log(sigma_sq[k])*N
-#         for i in range(kernel.M):
-#             det = np.prod(cond_cov_eig[k][i][0])
-#             if det <= 0:
-#                 print(cond_cov_eig[k][i][0]) 
-#             ll[:,k] += np.log(det)
-#             temp = cond_dev[k][kernel.ss_loc[i],:].T @ cond_cov_eig[k][i][1]
-#             ll[:,k] += np.sum(np.multiply(1/cond_cov_eig[k][i][0],np.square(temp)),axis=1)/sigma_sq[k]
-#     ll = ll*-0.5
-#     return ll
-
-# def LikRatio_Test(X,kernel_1,kernel_2,mean_1,mean_2,sigma_sq_1,sigma_sq_2,delta_1,delta_2):
-#     ll_1 = GaussianNLL(kernel_1,mean_1,sigma_sq_1,delta_1)
-#     ll_2 = GaussianNLL(kernel_2,mean_2,sigma_sq_2,delta_2)
-#     lr_stat = 2 * (ll_2 - ll_1)
-#     if ll_1 > ll_2:
-#         print("Model 1 fits better.")
-#     elif ll_2 > ll_1:
-#         print("Model 2 fits better.")
 
 
 class MixedGaussian:
@@ -353,7 +297,7 @@ class MixedGaussian:
             # cond_cov_eig = (self.kernel,self.delta)
             # cond_dev = update_cond_mean(X,self.mean,self.kernel)
 
-            ll = GaussianNLL(self.X,self.kernel,self.mean,self.sigma_sq,self.delta)
+            ll = GaussianNLL(self.Y,self.kernel,self.mean,self.sigma_sq,self.delta)
             #print(self.ll)
             #print(compute_likelihood(self.Y,self.kernel,self.cond_dev[0],self.sigma_sq[0],cond_cov_eig[0]))
             for k in range(self.K):
@@ -382,10 +326,8 @@ class MixedGaussian:
         converge = False
         while not converge:
             print('Iteration {}'.format(count))
-            cond_cov_eig = self.kernel.update_cond_cov(self.delta)
-            self.update_cond_mean()
+            ll = GaussianNLL(self.Y,self.kernel,self.mean,self.sigma_sq,self.delta)
 
-            self.ll = self.compute_ll(cond_cov_eig)
             #print(self.ll)
             #print(compute_likelihood(self.Y,self.kernel,self.cond_dev[0],self.sigma_sq[0],cond_cov_eig[0]))
             for k in range(self.K):
@@ -394,7 +336,7 @@ class MixedGaussian:
                 else:
                     for g in range(self.G):
                         #omega[g,k] = 3/4*self.pi[k]/np.sum(self.pi * _pexp((self.ll[g]-self.ll[g][k])/np.sqrt(self.N))) + omega[g,k]/4
-                        self.omega[g,k] = self.pi[k]/np.sum(self.pi * _pexp((self.ll[g]-self.ll[g][k]))) + 1e-3/self.G
+                        self.omega[g,k] = self.pi[k]/np.sum(self.pi * _pexp((ll[g]-ll[g][k]))) + 1e-3/self.G
                         # if np.sum(self.pi * _pexp((ll[g]-ll[g][k]))) == 0:
                         #     print(ll[g],ll[g][k])
 

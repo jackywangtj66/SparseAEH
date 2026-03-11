@@ -14,7 +14,7 @@ from contextlib import suppress
 from scipy.interpolate import interp1d
 from scipy.spatial import Delaunay
 
-from nsf_paper.utils.misc import poisson_deviance,dev2ss,rmse
+from .misc import poisson_deviance,dev2ss,rmse
 
 def heatmap(X,y,figsize=(6,4),bgcol="gray",cmap="turbo",**kwargs):
   fig,ax=plt.subplots(figsize=figsize)

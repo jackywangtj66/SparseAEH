@@ -1,7 +1,8 @@
 import numpy as np
 
-def update_cond_mean(X,mean,kernel):
+def update_cond_mean(X,mean,kernel,delta):
     # for a given data sample and hypothesized mean, calculate the conditional deviance on dependent spot set
+    K = mean.shape[-1]
     cond_dev = X[np.newaxis,:] - mean.transpose()[:,:,np.newaxis]   #K,N,G
     dev = cond_dev.copy()
     for i in range(kernel.M):
@@ -36,11 +37,11 @@ def GaussianNLL(X,kernel,mean,sigma_sq,delta):
     K = len(delta)
     ll = np.zeros((G,K))
 
-    cond_dev = update_cond_mean(X,mean,kernel)
+    cond_dev = update_cond_mean(X,mean,kernel,delta)
     cond_cov_eig = update_cond_cov(kernel,delta)
     
     for k in range(K):
-        ll[:,k] = np.log(2 * np.pi)*N + 2*np.log(sigma_sq[k])*N
+        ll[:,k] = np.log(2 * np.pi)*N + np.log(sigma_sq[k])*N
         for i in range(kernel.M):
             det = np.prod(cond_cov_eig[k][i][0])
             if det <= 0:
