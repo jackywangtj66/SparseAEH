@@ -2,6 +2,7 @@ import numpy as np
 #from function import RBF_kernel
 import scipy
 import time
+from scipy.special import logsumexp
 from sklearn.metrics.pairwise import laplacian_kernel,rbf_kernel
 from scipy.sparse import csr_matrix
 from operator import itemgetter
@@ -11,6 +12,7 @@ from scipy.spatial import distance_matrix
 import random
 from scipy.stats import chi2
 from .utils import update_cond_mean, update_cond_cov, GaussianNLL, LikRatio_Test
+from .covariance import line_search_covariance
 
 def _pinv_1d(v, eps=1e-5):
     return np.array([0 if abs(x) <= eps else 1/x for x in v], dtype=float)
@@ -109,7 +111,7 @@ class Kernel:
            self.ds_loc.append(ind)
     
     def _init_full_cov(self,cov):
-        self.full_cov = [[0 for _ in range(self.M)] for _ in range(self.M)]
+        self.full_cov = [{} for _ in range(self.M)]
         for i in range(self.M):
             if cov is not None:
                 self.full_cov[i][i] = cov[np.ix_(self.ss_loc[i],self.ss_loc[i])]
@@ -131,7 +133,7 @@ class Kernel:
         for k in range(self.M):
             for i in self.dependency[k]:
                 for j in self.dependency[k]:
-                    if j<i and isinstance(self.full_cov[i][j],int):
+                    if j<i and j not in self.full_cov[i]:
                         if cov is not None:
                             self.full_cov[i][j] = cov[np.ix_(self.ss_loc[i],self.ss_loc[j])]
                         else:
@@ -163,7 +165,8 @@ class Kernel:
             if len(self.dependency[i]) == 0:
                 self.cond_cov.append(self.get_mat([i],[i]))
             else:
-                self.cond_cov.append(self.get_mat([i],[i]) - np.multiply(1/self.ds_eig[i][0],self.A[i])@self.A[i].T)
+                inverse = _pinv_1d(self.ds_eig[i][0])
+                self.cond_cov.append(self.get_mat([i],[i]) - np.multiply(inverse,self.A[i])@self.A[i].T)
     
 
 
@@ -233,23 +236,41 @@ class MixedGaussian:
         return new_mean
     
     def update_mean(self,omega):
-        new_mean= np.zeros_like(self.mean)
+        new_mean = self.mean.copy()
         #mean
         for k in range(self.K):
-            new_mean[:,k:(k+1)] = self.Y @ omega[:,k:(k+1)] / np.sum(omega[:,k])
-        new_dev = self.Y[np.newaxis,:] - new_mean.transpose()[:,:,np.newaxis]
+            weight = np.sum(omega[:,k])
+            if weight > 0:
+                new_mean[:,k] = self.Y @ omega[:,k] / weight
         #pi
         if self.update_pi:
             self.pi = np.average(omega,axis=0)
         return new_mean
+
+    def update_covariance_line_search(self, omega, new_mean, **search_options):
+        diagnostics = []
+        for k in range(self.K):
+            if np.sum(omega[:, k]) <= 0:
+                diagnostics.append({'accepted': False, 'reason': 'zero component weight'})
+                continue
+            result = line_search_covariance(
+                self.Y - new_mean[:, k, None], omega[:, k], self.kernel,
+                self.sigma_sq[k], self.delta[k], **search_options
+            )
+            self.sigma_sq[k] = result['sigma_sq']
+            self.delta[k] = result['delta']
+            diagnostics.append(result)
+        return diagnostics
     
     def param_init(self):
-        samp_ind = random.sample(range(self.G),self.G//10)
+        if self.G < self.K:
+            raise ValueError("k-means initialization needs at least K features")
+        samp_ind = random.sample(range(self.G), max(self.K, self.G//10))
         sample = self.Y[:,samp_ind]
         kmeans = KMeans(n_clusters=self.K, random_state=0).fit(sample.T)
         return kmeans.cluster_centers_.T
 
-    def run_cluster(self,Y,K,pi=None,mean=None,sigma_sq=None,delta=None,iter=500,threshold=5e-2,init_mean='k_means',update_pi=True):
+    def _run_cluster_frobenius_legacy(self,Y,K,pi=None,mean=None,sigma_sq=None,delta=None,iter=500,threshold=5e-2,init_mean='k_means',update_pi=True):
         #initialization
         self.Y = Y
         self.K = K
@@ -349,6 +370,100 @@ class MixedGaussian:
             self.mean = new_mean
             #print(self.pi,self.sigma_sq,self.delta)
         self.labels = np.argmax(self.omega,axis=1)    
+        return self.mean
+
+    def run_cluster(self,Y,K,pi=None,mean=None,sigma_sq=None,delta=None,iter=500,
+                    threshold=5e-2,init_mean='k_means',update_pi=True,
+                    covariance_update='line_search',delta_bounds=(0.0,10.0),
+                    scale_floor=1e-8,search_grid_size=12,search_refinements=3,
+                    search_xatol=1e-4,acceptance_tolerance=1e-10,
+                    likelihood_tolerance=1e-6):
+        """Fit the normalized block-conditional mixture.
+
+        The default covariance step profiles sigma_sq and searches delta. The
+        Frobenius choice calls the original hybrid fitting routine unchanged.
+        """
+        if covariance_update == 'frobenius':
+            warnings.warn("The legacy Frobenius fit is not a likelihood M-step and "
+                          "does not have the line-search safeguard.", RuntimeWarning)
+            return self._run_cluster_frobenius_legacy(
+                Y,K,pi,mean,sigma_sq,delta,iter,threshold,init_mean,update_pi
+            )
+        if covariance_update != 'line_search':
+            raise ValueError("covariance_update must be 'line_search' or 'frobenius'")
+        self.Y = np.asarray(Y, dtype=float)
+        if self.Y.ndim != 2 or not np.all(np.isfinite(self.Y)):
+            raise ValueError("Y must be a finite locations-by-features matrix")
+        self.N,self.G = self.Y.shape
+        self.K = int(K)
+        if self.N != self.kernel.N or self.G == 0 or not 1 <= self.K <= self.G:
+            raise ValueError("K and Y must agree with the kernel and feature count")
+        if iter < 1 or threshold < 0 or likelihood_tolerance < 0:
+            raise ValueError("invalid iteration or convergence settings")
+        self.update_pi = update_pi
+        self.pi = (np.asarray(pi,dtype=float) if pi is not None
+                   else np.ones(self.K,dtype=float)/self.K)
+        if (self.pi.shape != (self.K,) or np.any(self.pi < 0)
+                or not np.all(np.isfinite(self.pi)) or not np.isclose(self.pi.sum(),1)):
+            raise ValueError("pi must be nonnegative and sum to one")
+
+        if mean is not None:
+            self.mean = np.asarray(mean,dtype=float).copy()
+        elif isinstance(init_mean,np.ndarray):
+            self.mean = np.asarray(init_mean,dtype=float).copy()
+        elif init_mean == 'k_means':
+            self.mean = self.param_init()
+        elif init_mean == 'sample':
+            self.mean = self.Y[:,np.random.choice(self.G,self.K,replace=False)].copy()
+        else:
+            raise ValueError("init_mean must be 'k_means', 'sample', or an array")
+        if self.mean.shape != (self.N,self.K) or not np.all(np.isfinite(self.mean)):
+            raise ValueError("mean must have shape (locations, K) and be finite")
+
+        self.sigma_sq = (np.asarray(sigma_sq,dtype=float).copy() if sigma_sq is not None
+                         else np.full(self.K,0.1))
+        self.delta = (np.asarray(delta,dtype=float).copy() if delta is not None
+                      else np.ones(self.K))
+        if (self.sigma_sq.shape != (self.K,) or not np.all(np.isfinite(self.sigma_sq))
+                or np.any(self.sigma_sq < scale_floor)):
+            raise ValueError("sigma_sq must be finite and at least scale_floor")
+        if (self.delta.shape != (self.K,) or not np.all(np.isfinite(self.delta))
+                or np.any(self.delta < delta_bounds[0]) or np.any(self.delta > delta_bounds[1])):
+            raise ValueError("initial delta must lie inside delta_bounds")
+
+        search_options = dict(delta_bounds=delta_bounds,scale_floor=scale_floor,
+                              grid_size=search_grid_size,refinements=search_refinements,
+                              xatol=search_xatol,
+                              acceptance_tolerance=acceptance_tolerance)
+        self.line_search_diagnostics = []
+        self.log_likelihood_history = []
+        log_pi = np.where(self.pi > 0,np.log(np.maximum(self.pi,np.finfo(float).tiny)),-np.inf)
+        ll = GaussianNLL(self.Y,self.kernel,self.mean,self.sigma_sq,self.delta)
+        observed = float(logsumexp(ll + log_pi,axis=1).sum())
+        self.log_likelihood_history.append(observed)
+
+        for _ in range(iter):
+            log_joint = ll + log_pi
+            self.omega = np.exp(log_joint - logsumexp(log_joint,axis=1,keepdims=True))
+            previous_mean = self.mean.copy()
+            new_mean = self.update_mean(self.omega)
+            self.line_search_diagnostics.append(
+                self.update_covariance_line_search(self.omega,new_mean,**search_options)
+            )
+            self.mean = new_mean
+            log_pi = np.where(self.pi > 0,np.log(np.maximum(self.pi,np.finfo(float).tiny)),-np.inf)
+            ll = GaussianNLL(self.Y,self.kernel,self.mean,self.sigma_sq,self.delta)
+            updated = float(logsumexp(ll + log_pi,axis=1).sum())
+            self.log_likelihood_history.append(updated)
+            relative_change = abs(updated-observed)/max(1.0,abs(observed))
+            if (np.mean(np.abs(new_mean-previous_mean)) <= threshold
+                    and relative_change <= likelihood_tolerance):
+                break
+            observed = updated
+
+        log_joint = ll + log_pi
+        self.omega = np.exp(log_joint - logsumexp(log_joint,axis=1,keepdims=True))
+        self.labels = np.argmax(self.omega,axis=1)
         return self.mean
 
     def cluster_counts(self,query_label=None):

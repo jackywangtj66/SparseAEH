@@ -1,4 +1,5 @@
 import numpy as np
+from .covariance import block_statistics
 
 def update_cond_mean(X,mean,kernel,delta):
     # for a given data sample and hypothesized mean, calculate the conditional deviance on dependent spot set
@@ -28,28 +29,22 @@ def update_cond_cov(kernel,Delta):
     return cond_cov_eig
 
 def GaussianNLL(X,kernel,mean,sigma_sq,delta):
-    # for a given data sample and hypothesized mean and variance,  compute the log likelihood
-    N,G = X.shape
-    if isinstance(delta,int):
-        delta = np.array([delta])
-    if isinstance(sigma_sq,int):
-        sigma_sq = np.array([sigma_sq])
+    """Log densities of each feature under each block-conditional component."""
+    X = np.asarray(X, dtype=float)
+    mean = np.asarray(mean, dtype=float)
+    sigma_sq = np.atleast_1d(np.asarray(sigma_sq, dtype=float))
+    delta = np.atleast_1d(np.asarray(delta, dtype=float))
+    N, G = X.shape
     K = len(delta)
-    ll = np.zeros((G,K))
-
-    cond_dev = update_cond_mean(X,mean,kernel,delta)
-    cond_cov_eig = update_cond_cov(kernel,delta)
-    
+    if mean.shape != (N, K) or sigma_sq.shape != (K,):
+        raise ValueError("mean, sigma_sq, and delta have incompatible shapes")
+    if np.any(sigma_sq <= 0) or not np.all(np.isfinite(sigma_sq)):
+        raise ValueError("sigma_sq must be positive and finite")
+    ll = np.empty((G, K), dtype=float)
     for k in range(K):
-        ll[:,k] = np.log(2 * np.pi)*N + np.log(sigma_sq[k])*N
-        for i in range(kernel.M):
-            det = np.prod(cond_cov_eig[k][i][0])
-            if det <= 0:
-                print(cond_cov_eig[k][i][0]) 
-            ll[:,k] += np.log(det)
-            temp = cond_dev[k][kernel.ss_loc[i],:].T @ cond_cov_eig[k][i][1]
-            ll[:,k] += np.sum(np.multiply(1/cond_cov_eig[k][i][0],np.square(temp)),axis=1)/sigma_sq[k]
-    ll = ll*-0.5
+        logdet, quadratic = block_statistics(X - mean[:, k, None], kernel, delta[k])
+        ll[:, k] = -0.5 * (N * np.log(2 * np.pi * sigma_sq[k])
+                           + logdet + quadratic / sigma_sq[k])
     return ll
 
 def LikRatio_Test(X,kernel_1,kernel_2,mean_1,mean_2,sigma_sq_1,sigma_sq_2,delta_1,delta_2):
