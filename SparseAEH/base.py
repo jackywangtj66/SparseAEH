@@ -247,19 +247,31 @@ class MixedGaussian:
             self.pi = np.average(omega,axis=0)
         return new_mean
 
-    def update_covariance_line_search(self, omega, new_mean, **search_options):
+    def update_covariance_line_search(self, omega, new_mean, return_likelihood=False,
+                                     **search_options):
         diagnostics = []
+        ll = np.empty((self.G, self.K)) if return_likelihood else None
         for k in range(self.K):
             if np.sum(omega[:, k]) <= 0:
                 diagnostics.append({'accepted': False, 'reason': 'zero component weight'})
+                if return_likelihood:
+                    ll[:, k] = GaussianNLL(
+                        self.Y, self.kernel, new_mean[:, k:k+1],
+                        self.sigma_sq[k:k+1], self.delta[k:k+1]
+                    )[:, 0]
                 continue
-            result = line_search_covariance(
+            result, (logdet, quadratic) = line_search_covariance(
                 self.Y - new_mean[:, k, None], omega[:, k], self.kernel,
-                self.sigma_sq[k], self.delta[k], **search_options
+                self.sigma_sq[k], self.delta[k], return_statistics=True, **search_options
             )
             self.sigma_sq[k] = result['sigma_sq']
             self.delta[k] = result['delta']
+            if return_likelihood:
+                ll[:, k] = -0.5 * (self.N * np.log(2 * np.pi * self.sigma_sq[k])
+                                   + logdet + quadratic / self.sigma_sq[k])
             diagnostics.append(result)
+        if return_likelihood:
+            return diagnostics, ll
         return diagnostics
     
     def param_init(self):
@@ -447,12 +459,12 @@ class MixedGaussian:
             self.omega = np.exp(log_joint - logsumexp(log_joint,axis=1,keepdims=True))
             previous_mean = self.mean.copy()
             new_mean = self.update_mean(self.omega)
-            self.line_search_diagnostics.append(
-                self.update_covariance_line_search(self.omega,new_mean,**search_options)
+            diagnostics, ll = self.update_covariance_line_search(
+                self.omega,new_mean,return_likelihood=True,**search_options
             )
+            self.line_search_diagnostics.append(diagnostics)
             self.mean = new_mean
             log_pi = np.where(self.pi > 0,np.log(np.maximum(self.pi,np.finfo(float).tiny)),-np.inf)
-            ll = GaussianNLL(self.Y,self.kernel,self.mean,self.sigma_sq,self.delta)
             updated = float(logsumexp(ll + log_pi,axis=1).sum())
             self.log_likelihood_history.append(updated)
             relative_change = abs(updated-observed)/max(1.0,abs(observed))

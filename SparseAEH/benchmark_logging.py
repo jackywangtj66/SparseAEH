@@ -354,6 +354,6 @@ class _Run:
         }
         with self.recorder.runs_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, default=_json_default) + "\n")
-        print(f"Benchmark recorded: {self.method}, {elapsed:.3f} s -> "
+        print(f"Benchmark recorded [{record['status']}]: {self.method}, {elapsed:.3f} s -> "
               f"{self.recorder.runs_path}")
         return False
