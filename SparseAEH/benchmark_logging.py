@@ -176,7 +176,7 @@ class BenchmarkRecorder:
             "git_status": _command(["git", "status", "--short"], cwd=_REPO),
             "source_sha256": {
                 name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
-                for name in ("base.py", "covariance.py", "benchmark_logging.py")
+                for name in ("base.py", "covariance.py", "benchmark_logging.py", "epoch_logging.py")
                 if (Path(__file__).parent / name).exists()
             },
             "recorder_source": str(Path(__file__).resolve()),
