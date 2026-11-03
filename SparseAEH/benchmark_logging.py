@@ -81,6 +81,17 @@ def _json_default(value):
     raise TypeError(f"Cannot serialize {type(value).__name__}")
 
 
+def write_json_atomic(path, value):
+    """Replace a small status file only after its new contents are complete."""
+    path = Path(path)
+    temporary = path.with_name(path.name + '.partial')
+    with temporary.open('w', encoding='utf-8') as handle:
+        json.dump(value, handle, indent=2, default=_json_default)
+        handle.write('\n')
+        handle.flush()
+    temporary.replace(path)
+
+
 def sparseaeh_details(model):
     """Summarize the realized partition and line-search work after fitting."""
     sizes = [len(locations) for locations in model.kernel.ss_loc]
@@ -111,7 +122,7 @@ class BenchmarkRecorder:
     """Create one recorder per notebook execution, on the benchmark machine."""
 
     def __init__(self, notebook, output_dir="benchmark_logs", sample_interval=0.1,
-                 seed=None):
+                 seed=None, persist_peak=False):
         try:
             import psutil
         except ImportError as exc:
@@ -125,6 +136,7 @@ class BenchmarkRecorder:
         self.notebook = str(notebook)
         self.seed = seed
         self.sample_interval = float(sample_interval)
+        self.persist_peak = bool(persist_peak)
         self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -181,6 +193,7 @@ class BenchmarkRecorder:
             },
             "recorder_source": str(Path(__file__).resolve()),
             "memory_sampling_interval_seconds": self.sample_interval,
+            "persist_peak": self.persist_peak,
         }
         self.environment_path.write_text(
             json.dumps(environment, indent=2, default=_json_default) + "\n",
@@ -220,6 +233,8 @@ class _Run:
         self._gpu_monitor_error = None
         self._monitor_error = None
         self._elapsed = None
+        self.peak_path = (recorder.output_dir / f"peak_{recorder.session_id}_{uuid.uuid4().hex[:8]}.json"
+                          if recorder.persist_peak else None)
 
     def finish_timing(self, seconds=None):
         """Stop the timer before collecting result metadata or use a cell's timer."""
@@ -243,11 +258,28 @@ class _Run:
             except (self.recorder.psutil.NoSuchProcess,
                     self.recorder.psutil.AccessDenied):
                 continue
+        previous_peak = self._peak_rss
         self._peak_rss = max(self._peak_rss, rss)
         if self._baseline_rss is None:
             self._baseline_rss = rss
         self._samples += 1
         self._pids = pids
+        if self.peak_path is not None and (self._samples == 1 or self._peak_rss > previous_peak):
+            self._write_peak('running')
+
+    def _write_peak(self, status, error=None):
+        write_json_atomic(self.peak_path, {
+            'session_id': self.recorder.session_id, 'pid': os.getpid(),
+            'method': self.method, 'dataset': self.dataset, 'scope': self.scope,
+            'parameters': self.parameters, 'input_shape': self.input_shape,
+            'updated_utc': datetime.now(timezone.utc).isoformat(),
+            'status': status, 'error': error,
+            'baseline_process_tree_rss_bytes': self._baseline_rss,
+            'peak_process_tree_rss_bytes': self._peak_rss,
+            'rss_sampling_interval_seconds': self.recorder.sample_interval,
+            'rss_definition': 'sum of process and child RSS; shared pages may be counted more than once',
+            'note': 'One peak summary, not a time series. Running does not establish whether a process is still alive or was killed.',
+        })
 
     def _sample_gpu(self):
         if self.device != "cpu" and self._gpu_query_available:
@@ -351,7 +383,10 @@ class _Run:
             "status": "error" if exc_type is not None else "ok",
             "error": repr(exc) if exc_type is not None else None,
             "monitor_error": self._monitor_error,
+            "persisted_peak_file": str(self.peak_path) if self.peak_path is not None else None,
         }
+        if self.peak_path is not None and not self._worker.is_alive():
+            self._write_peak(record['status'], record['error'])
         with self.recorder.runs_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, default=_json_default) + "\n")
         print(f"Benchmark recorded [{record['status']}]: {self.method}, {elapsed:.3f} s -> "

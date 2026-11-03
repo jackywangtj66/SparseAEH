@@ -55,6 +55,7 @@ class EpochRecorder:
         self.events += 1
         output_started = time.perf_counter()
         folder = self.output_dir / ('event_{:06d}_epoch_{:06d}'.format(self.events, epoch))
+        staging = folder.with_name(folder.name + '.partial')
         record = dict(event=self.events, epoch=epoch, method=self.method,
                       recorded_utc=datetime.now(timezone.utc).isoformat(),
                       compute_seconds=compute,
@@ -65,8 +66,16 @@ class EpochRecorder:
         save_error = None
         try:
             if error is None:
-                folder.mkdir()
-                record.update(self._save(state, folder))
+                staging.mkdir()
+                saved = self._save(state, staging)
+                if 'checkpoint' in saved:
+                    saved['checkpoint'] = str(folder / Path(saved['checkpoint']).name)
+                (staging / 'COMPLETE.json').write_text(json.dumps({
+                    'method': self.method, 'epoch': epoch, 'event': self.events,
+                    'files': sorted(p.name for p in staging.iterdir()),
+                }, indent=2), encoding='utf-8')
+                staging.rename(folder)
+                record.update(saved)
                 record['result_dir'] = str(folder)
                 self.completed += 1
         except Exception as exc:
