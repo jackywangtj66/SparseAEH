@@ -178,7 +178,8 @@ class ModelTrainer(object): #goal to change this to tf.module?
                            verbose=True, num_epochs=5000,
                            ptic = process_time(), wtic = time(), ckpt_freq=50,
                            kernel_hp_update_freq=10, status_freq=10,
-                           span=100, tol=5e-5, pickle_freq=None):
+                           span=100, tol=5e-5, pickle_freq=None,
+                           epoch_callback=None):
     """
     Dtrain, Dval : tensorflow Datasets produced by prepare_datasets_tf func
     ckpt_mgr must store at least 2 checkpoints (max_to_keep)
@@ -194,6 +195,7 @@ class ModelTrainer(object): #goal to change this to tf.module?
     span: when checking for convergence, how many recent observations to consider
     tol: numerical (relative) change below which convergence is declared
     pickle_freq: how often to save the entire object to disk as a pickle file
+    epoch_callback: optional diagnostic callback(event, epoch, loss); does not change stopping
     """
     ptic,wtic = self.checkpoint(ckpt_mgr, process_time()-ptic, time()-wtic)
     self.loss["train"] = rpad(self.loss["train"],num_epochs+1)
@@ -222,6 +224,8 @@ class ModelTrainer(object): #goal to change this to tf.module?
     cvg = 0 #increment each time we think it has converged
     cc = ConvergenceChecker(span)
     while (not self.converged) and (self.epoch < num_epochs):
+      if epoch_callback is not None:
+        epoch_callback('start', int(self.epoch.numpy()) + 1, None)
       # try:
       epoch_loss = tf.keras.metrics.Mean()
       chol=(self.epoch % kernel_hp_update_freq==0)
@@ -231,6 +235,8 @@ class ModelTrainer(object): #goal to change this to tf.module?
       self.epoch.assign_add(1)
       i = self.epoch.numpy()
       self.loss["train"][i] = trl
+      if epoch_callback is not None:
+        epoch_callback('loss', int(i), float(trl))
       if not np.isfinite(trl) or trl>self.loss["train"][1]:
         raise NumericalDivergenceError
       if i%status_freq==0 or i==num_epochs:
@@ -253,6 +259,8 @@ class ModelTrainer(object): #goal to change this to tf.module?
         ptic,wtic = self.checkpoint(ckpt_mgr, process_time()-ptic, time()-wtic)
       if self.pickle_path and i%pickle_freq==0:
         ptic,wtic = self.pickle(process_time()-ptic, time()-wtic)
+      if epoch_callback is not None:
+        epoch_callback('end', int(i), float(trl))
       # except tf.errors.InvalidArgumentError as err: #cholesky failed
       #   j = i.numpy() #save the current epoch value for printing
       #   ptic,wtic = self.restore()
