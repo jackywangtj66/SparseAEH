@@ -22,13 +22,15 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 #             plt.title('{}'.format(gaussian.pi[i]))
 #         plt.gcf().set_dpi(300)
 
-def plot_clusters(gaussian=None, mean=None, spatial=None, count=None, label='genes', figsize=None, s=15, base_subplot_size_inches=(4, 4), save=None, *, percentiles=(1, 99), show=True, rasterized=False):
+def plot_clusters(gaussian=None, mean=None, spatial=None, count=None, label='genes', figsize=None, s=15, base_subplot_size_inches=(4, 4), save=None, *, percentiles=(1, 99), show=True, rasterized=False, spatial_order='xy', invert_y=True):
     """Plot means with a shared viridis scale, pooled across all patterns.
 
     Percentile limits saturate colors only; input values are not modified.
     Colorbar extensions mark values outside the limits in each panel.
     Set percentiles=None for the full range. Coincident percentile limits
     fall back to the full range. Returns (figure, flat occupied axes).
+    Use spatial_order='row_col', invert_y=False for CRC array coordinates:
+    columns run horizontally and larger rows appear at the top.
     """
     if gaussian is not None:
         mean = gaussian.mean
@@ -45,7 +47,11 @@ def plot_clusters(gaussian=None, mean=None, spatial=None, count=None, label='gen
     k = mean.shape[1]
     if count is not None and len(count) != k:
         raise ValueError('count must have one entry per pattern.')
+    if spatial_order not in ('xy', 'row_col'):
+        raise ValueError("spatial_order must be 'xy' or 'row_col'.")
     sx, sy = spatial[:, 0], spatial[:, 1]
+    if spatial_order == 'row_col':
+        sx, sy = sy, sx
 
     if percentiles is None:
         vmin, vmax = mean.min(), mean.max()
@@ -91,7 +97,8 @@ def plot_clusters(gaussian=None, mean=None, spatial=None, count=None, label='gen
                         norm=norm, rasterized=rasterized)
 
         ax.set_aspect('equal', adjustable='box') # Ensures square aspect ratio for the plot area
-        ax.invert_yaxis() 
+        if invert_y:
+            ax.invert_yaxis()
         
         if gaussian is not None:
             ax.set_title(f'Cluster {i+1}: {np.sum(gaussian.labels==i)} {label}')

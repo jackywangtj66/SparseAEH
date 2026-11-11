@@ -169,7 +169,8 @@ def save_full_result(ns, output):
                         log_likelihood_history=model.log_likelihood_history)
     np.savez_compressed(output / 'gem_initialization.npz', sampled_gene_indices=ns['crc_gem_sample'],
                         **ns['crc_gem_initial'])
-    ns['plot_clusters'](model, s=2, save=str(output / 'full_covariance_gem.png'))
+    ns['plot_clusters'](model, s=2, spatial_order='row_col', invert_y=False,
+                        save=str(output / 'full_covariance_gem.png'))
 
 
 def execute_workflow(args, output, status, update):
