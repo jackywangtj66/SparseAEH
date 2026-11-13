@@ -41,7 +41,7 @@ def redraw(result_dir, method='sparseaeh'):
     target = final / f'{stem}.png'
     temporary = target.with_suffix('.redraw.png')
     fig, _ = plot_clusters(mean=means.to_numpy(), spatial=spatial, count=count, s=2,
-                           spatial_order='row_col', invert_y=False, show=False)
+                           invert_y=False, show=False)
     try:
         fig.savefig(temporary)
         temporary.replace(target)
